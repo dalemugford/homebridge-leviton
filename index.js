@@ -454,11 +454,16 @@ class LevitonDecoraSmartPlatform {
     // get device and token out of context to update status
     const device = accessory.context.device
     const token = accessory.context.token
-    const status = await this.getStatus(device, token)
 
     // get the accessory service, if not add it
     const service =
       accessory.getService(Service.Lightbulb, device.name) || accessory.addService(Service.Lightbulb, device.name)
+
+    // HomeKit always gets 0-100. This has to happen before the first await: setProps after the bridge has
+    // published does not bump the HomeKit configuration number, so iOS would keep the old metadata
+    service.getCharacteristic(Characteristic.Brightness).setProps({ minValue: 0, maxValue: 100, minStep: 1 })
+
+    const status = await this.getStatus(device, token)
 
     // add handlers for on/off characteristic, set initial value
     service
@@ -467,16 +472,11 @@ class LevitonDecoraSmartPlatform {
       .on('set', this.onSetPower(service, device, token).bind(this))
       .updateValue(status.power === 'ON' ? true : false)
 
-    // set handlers for brightness, set initial value and min/max bounds
+    // set handlers for brightness and initial value
     service
       .getCharacteristic(Characteristic.Brightness)
       .on('get', this.onGetBrightness(service, device, token).bind(this))
       .on('set', this.onSetBrightness(service, device, token).bind(this))
-      .setProps({
-        minValue: 0,
-        maxValue: 100,
-        minStep: 1,
-      })
       .updateValue(status.brightness)
   }
 
