@@ -198,6 +198,14 @@ class LevitonDecoraSmartPlatform {
       })
     )
     this.assertConnected(current)
+    // dimmers can have a configured min/max level (e.g. 5-50), HomeKit always shows 0-100,
+    // so keep commands inside the range the device accepts
+    if (params.brightness) {
+      params = {
+        ...params,
+        brightness: Math.min(Math.max(params.brightness, current.minLevel ?? 0), current.maxLevel ?? 100),
+      }
+    }
     return this.withAuth((authToken) =>
       Leviton.putIotSwitch({
         switchID: device.id,
@@ -465,8 +473,8 @@ class LevitonDecoraSmartPlatform {
       .on('get', this.onGetBrightness(service, device, token).bind(this))
       .on('set', this.onSetBrightness(service, device, token).bind(this))
       .setProps({
-        minValue: status.minLevel ?? 1,
-        maxValue: status.maxLevel ?? 100,
+        minValue: 0,
+        maxValue: 100,
         minStep: 1,
       })
       .updateValue(status.brightness)
