@@ -79,10 +79,7 @@ class LevitonDecoraSmartPlatform {
     this.log.debug('initialize')
 
     try {
-      var login = await Leviton.postPersonLogin({
-        email: this.config['email'],
-        password: this.config['password'],
-      })
+      var login = await this.login()
       var { id: token, userId: personID } = login
       this.log.debug(`personID: ${personID}, hasToken: ${!!token}`)
     } catch (err) {
@@ -153,13 +150,45 @@ class LevitonDecoraSmartPlatform {
     return { devices, token }
   }
 
+  // The token saved in cached accessories expires (Leviton ttl is 60 days) and was never refreshed,
+  // so every request silently failed with 401 while HomeKit was told it succeeded.
+  async login() {
+    if (!this.loginInFlight) {
+      this.loginInFlight = Leviton.postPersonLogin({ email: this.config['email'], password: this.config['password'] })
+        .then((login) => {
+          if (!login || !login.id) throw new Error('Leviton login failed')
+          this.currentToken = login.id
+          return login
+        })
+        .finally(() => {
+          this.loginInFlight = null
+        })
+    }
+    return this.loginInFlight
+  }
+
+  // run an API call with a live token, re-login once on 401, and throw on any API error
+  async withAuth(fn) {
+    if (!this.currentToken) await this.login()
+    let res = await fn(this.currentToken)
+    if (res && res.error && res.error.statusCode === 401) {
+      this.log.info('Leviton token rejected (401), logging in again')
+      await this.login()
+      res = await fn(this.currentToken)
+    }
+    if (res && res.error) throw new Error(res.error.message || 'Leviton API error')
+    return res
+  }
+
   // switch power state getter, closure with service, device and token
   onGetPower(service, device, token) {
     return function (callback) {
-      return Leviton.getIotSwitch({
-        switchID: device.id,
-        token,
-      })
+      return this.withAuth((authToken) =>
+        Leviton.getIotSwitch({
+          switchID: device.id,
+          token: authToken,
+        })
+      )
         .then((res) => {
           this.log.debug(`onGetPower: ${device.name} ${res.power}`)
           service.getCharacteristic(Characteristic.On).updateValue(res.power === 'ON')
@@ -167,6 +196,7 @@ class LevitonDecoraSmartPlatform {
         })
         .catch((err) => {
           this.log.error(`onGetPower error: ${err.message}`)
+          callback(err)
         })
     }
   }
@@ -174,11 +204,13 @@ class LevitonDecoraSmartPlatform {
   // switch power state setter, closure with service, device and token
   onSetPower(service, device, token) {
     return function (value, callback) {
-      return Leviton.putIotSwitch({
-        switchID: device.id,
-        power: value ? 'ON' : 'OFF',
-        token,
-      })
+      return this.withAuth((authToken) =>
+        Leviton.putIotSwitch({
+          switchID: device.id,
+          power: value ? 'ON' : 'OFF',
+          token: authToken,
+        })
+      )
         .then((res) => {
           this.log.info(`onSetPower: ${device.name} ${res.power}`)
           service.getCharacteristic(Characteristic.On).updateValue(res.power === 'ON')
@@ -186,6 +218,7 @@ class LevitonDecoraSmartPlatform {
         })
         .catch((err) => {
           this.log.error(`onSetPower error: ${err.message}`)
+          callback(err)
         })
     }
   }
@@ -193,10 +226,12 @@ class LevitonDecoraSmartPlatform {
   // switch brightness getter closure with service, device and token
   onGetBrightness(service, device, token) {
     return function (callback) {
-      return Leviton.getIotSwitch({
-        switchID: device.id,
-        token,
-      })
+      return this.withAuth((authToken) =>
+        Leviton.getIotSwitch({
+          switchID: device.id,
+          token: authToken,
+        })
+      )
         .then((res) => {
           this.log.debug(`onGetBrightness: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.Brightness).updateValue(res.brightness)
@@ -204,6 +239,7 @@ class LevitonDecoraSmartPlatform {
         })
         .catch((err) => {
           this.log.error(`onGetBrightness error: ${err.message}`)
+          callback(err)
         })
     }
   }
@@ -211,11 +247,13 @@ class LevitonDecoraSmartPlatform {
   // switch brightness setter closure with service, device and token
   onSetBrightness(service, device, token) {
     return function (brightness, callback) {
-      return Leviton.putIotSwitch({
-        switchID: device.id,
-        brightness,
-        token,
-      })
+      return this.withAuth((authToken) =>
+        Leviton.putIotSwitch({
+          switchID: device.id,
+          brightness,
+          token: authToken,
+        })
+      )
         .then((res) => {
           this.log.info(`onSetBrightness: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.Brightness).updateValue(res.brightness)
@@ -223,6 +261,7 @@ class LevitonDecoraSmartPlatform {
         })
         .catch((err) => {
           this.log.error(`onSetBrightness error: ${err.message}`)
+          callback(err)
         })
     }
   }
@@ -230,10 +269,12 @@ class LevitonDecoraSmartPlatform {
   // switch RotationSpeed getter closure with service, device and token
   onGetRotationSpeed(service, device, token) {
     return function (callback) {
-      return Leviton.getIotSwitch({
-        switchID: device.id,
-        token,
-      })
+      return this.withAuth((authToken) =>
+        Leviton.getIotSwitch({
+          switchID: device.id,
+          token: authToken,
+        })
+      )
         .then((res) => {
           this.log.debug(`onGetRotationSpeed: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.RotationSpeed).updateValue(res.brightness)
@@ -241,6 +282,7 @@ class LevitonDecoraSmartPlatform {
         })
         .catch((err) => {
           this.log.error(`onGetRotationSpeed error: ${err.message}`)
+          callback(err)
         })
     }
   }
@@ -248,11 +290,13 @@ class LevitonDecoraSmartPlatform {
   // switch RotationSpeed setter closure with service, device and token
   onSetRotationSpeed(service, device, token) {
     return function (brightness, callback) {
-      return Leviton.putIotSwitch({
-        switchID: device.id,
-        brightness,
-        token,
-      })
+      return this.withAuth((authToken) =>
+        Leviton.putIotSwitch({
+          switchID: device.id,
+          brightness,
+          token: authToken,
+        })
+      )
         .then((res) => {
           this.log.info(`onSetRotationSpeed: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.RotationSpeed).updateValue(res.brightness)
@@ -260,6 +304,7 @@ class LevitonDecoraSmartPlatform {
         })
         .catch((err) => {
           this.log.error(`onSetRotationSpeed error: ${err.message}`)
+          callback(err)
         })
     }
   }
@@ -303,10 +348,17 @@ class LevitonDecoraSmartPlatform {
   // fetch the status of a device to populate power state and brightness
   async getStatus(device, token) {
     this.log.debug(`getStatus: ${device.name}`)
-    return Leviton.getIotSwitch({
-      switchID: device.id,
-      token,
-    })
+    try {
+      return await this.withAuth((authToken) =>
+        Leviton.getIotSwitch({
+          switchID: device.id,
+          token: authToken,
+        })
+      )
+    } catch (err) {
+      this.log.error(`getStatus error for ${device.name}: ${err.message}`)
+      return {}
+    }
   }
 
   // setup service function
@@ -409,8 +461,8 @@ class LevitonDecoraSmartPlatform {
       .on('get', this.onGetBrightness(service, device, token).bind(this))
       .on('set', this.onSetBrightness(service, device, token).bind(this))
       .setProps({
-        minValue: status.minLevel,
-        maxValue: status.maxLevel,
+        minValue: status.minLevel ?? 1,
+        maxValue: status.maxLevel ?? 100,
         minStep: 1,
       })
       .updateValue(status.brightness)
