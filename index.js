@@ -1,4 +1,4 @@
-let Service, Characteristic, Accessory, UUID
+let Service, Characteristic, Accessory, UUID, HapStatusError, HAPStatus
 const Leviton = require('./api.js')
 const PLUGIN_NAME = 'homebridge-leviton'
 const PLATFORM_NAME = 'LevitonDecoraSmart'
@@ -180,6 +180,39 @@ class LevitonDecoraSmartPlatform {
     return res
   }
 
+  // Leviton's cloud reports `connected: false` for a device that is unplugged or offline.
+  // Throwing a communication failure makes HomeKit show "No Response" for the accessory,
+  // and it clears by itself the next time the device reports connected.
+  assertConnected(status) {
+    if (status && status.connected === false) {
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+    }
+  }
+
+  // never send a command to an offline device, it could be queued and fire when it reconnects
+  async putIfConnected(device, params) {
+    const current = await this.withAuth((authToken) =>
+      Leviton.getIotSwitch({
+        switchID: device.id,
+        token: authToken,
+      })
+    )
+    this.assertConnected(current)
+    return this.withAuth((authToken) =>
+      Leviton.putIotSwitch({
+        switchID: device.id,
+        token: authToken,
+        ...params,
+      })
+    )
+  }
+
+  handleError(label, err, callback) {
+    if (err instanceof HapStatusError) this.log.debug(`${label}: device is offline`)
+    else this.log.error(`${label} error: ${err.message}`)
+    callback(err)
+  }
+
   // switch power state getter, closure with service, device and token
   onGetPower(service, device, token) {
     return function (callback) {
@@ -190,36 +223,25 @@ class LevitonDecoraSmartPlatform {
         })
       )
         .then((res) => {
+          this.assertConnected(res)
           this.log.debug(`onGetPower: ${device.name} ${res.power}`)
           service.getCharacteristic(Characteristic.On).updateValue(res.power === 'ON')
           callback(null, res.power === 'ON')
         })
-        .catch((err) => {
-          this.log.error(`onGetPower error: ${err.message}`)
-          callback(err)
-        })
+        .catch((err) => this.handleError('onGetPower', err, callback))
     }
   }
 
   // switch power state setter, closure with service, device and token
   onSetPower(service, device, token) {
     return function (value, callback) {
-      return this.withAuth((authToken) =>
-        Leviton.putIotSwitch({
-          switchID: device.id,
-          power: value ? 'ON' : 'OFF',
-          token: authToken,
-        })
-      )
+      return this.putIfConnected(device, { power: value ? 'ON' : 'OFF' })
         .then((res) => {
           this.log.info(`onSetPower: ${device.name} ${res.power}`)
           service.getCharacteristic(Characteristic.On).updateValue(res.power === 'ON')
           callback()
         })
-        .catch((err) => {
-          this.log.error(`onSetPower error: ${err.message}`)
-          callback(err)
-        })
+        .catch((err) => this.handleError('onSetPower', err, callback))
     }
   }
 
@@ -233,36 +255,25 @@ class LevitonDecoraSmartPlatform {
         })
       )
         .then((res) => {
+          this.assertConnected(res)
           this.log.debug(`onGetBrightness: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.Brightness).updateValue(res.brightness)
           callback(null, res.brightness)
         })
-        .catch((err) => {
-          this.log.error(`onGetBrightness error: ${err.message}`)
-          callback(err)
-        })
+        .catch((err) => this.handleError('onGetBrightness', err, callback))
     }
   }
 
   // switch brightness setter closure with service, device and token
   onSetBrightness(service, device, token) {
     return function (brightness, callback) {
-      return this.withAuth((authToken) =>
-        Leviton.putIotSwitch({
-          switchID: device.id,
-          brightness,
-          token: authToken,
-        })
-      )
+      return this.putIfConnected(device, { brightness })
         .then((res) => {
           this.log.info(`onSetBrightness: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.Brightness).updateValue(res.brightness)
           callback()
         })
-        .catch((err) => {
-          this.log.error(`onSetBrightness error: ${err.message}`)
-          callback(err)
-        })
+        .catch((err) => this.handleError('onSetBrightness', err, callback))
     }
   }
 
@@ -276,36 +287,25 @@ class LevitonDecoraSmartPlatform {
         })
       )
         .then((res) => {
+          this.assertConnected(res)
           this.log.debug(`onGetRotationSpeed: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.RotationSpeed).updateValue(res.brightness)
           callback(null, res.brightness)
         })
-        .catch((err) => {
-          this.log.error(`onGetRotationSpeed error: ${err.message}`)
-          callback(err)
-        })
+        .catch((err) => this.handleError('onGetRotationSpeed', err, callback))
     }
   }
 
   // switch RotationSpeed setter closure with service, device and token
   onSetRotationSpeed(service, device, token) {
     return function (brightness, callback) {
-      return this.withAuth((authToken) =>
-        Leviton.putIotSwitch({
-          switchID: device.id,
-          brightness,
-          token: authToken,
-        })
-      )
+      return this.putIfConnected(device, { brightness })
         .then((res) => {
           this.log.info(`onSetRotationSpeed: ${device.name} @ ${res.brightness}%`)
           service.getCharacteristic(Characteristic.RotationSpeed).updateValue(res.brightness)
           callback()
         })
-        .catch((err) => {
-          this.log.error(`onSetRotationSpeed error: ${err.message}`)
-          callback(err)
-        })
+        .catch((err) => this.handleError('onSetRotationSpeed', err, callback))
     }
   }
 
@@ -349,12 +349,16 @@ class LevitonDecoraSmartPlatform {
   async getStatus(device, token) {
     this.log.debug(`getStatus: ${device.name}`)
     try {
-      return await this.withAuth((authToken) =>
+      const status = await this.withAuth((authToken) =>
         Leviton.getIotSwitch({
           switchID: device.id,
           token: authToken,
         })
       )
+      if (status.connected === false) {
+        this.log.warn(`${device.name} is offline in the Leviton cloud, HomeKit will show No Response until it reconnects`)
+      }
+      return status
     } catch (err) {
       this.log.error(`getStatus error for ${device.name}: ${err.message}`)
       return {}
@@ -512,5 +516,7 @@ module.exports = function (homebridge) {
   Characteristic = homebridge.hap.Characteristic
   Accessory = homebridge.hap.Accessory
   UUID = homebridge.hap.uuid
+  HapStatusError = homebridge.hap.HapStatusError
+  HAPStatus = homebridge.hap.HAPStatus
   homebridge.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, LevitonDecoraSmartPlatform, true)
 }
